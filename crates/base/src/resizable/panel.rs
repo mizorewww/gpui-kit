@@ -5,9 +5,9 @@ use std::{
 
 use gpui::{
     Along, AnyElement, App, AppContext, Axis, Bounds, Context, Element, ElementId, Empty, Entity,
-    EventEmitter, InteractiveElement as _, IntoElement, IsZero as _, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Render, RenderOnce, Style, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder,
+    EventEmitter, InteractiveElement as _, IntoElement, IsZero as _, MouseButton, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Render, RenderOnce, Style, StyleRefinement, Styled,
+    Window, div, prelude::FluentBuilder,
 };
 
 use crate::{AxisExt, ElementExt, StyledExt as _, h_flex, resizable::PANEL_MIN_SIZE, v_flex};
@@ -201,7 +201,6 @@ impl RenderOnce for ResizablePanelGroup {
             })
             .child(ResizePanelGroupElement {
                 state: state.clone(),
-                axis: self.axis,
                 on_resize: self.on_resize.clone(),
             })
     }
@@ -367,11 +366,16 @@ impl RenderOnce for ResizablePanel {
                         .when_some(self.handle_appearance.clone(), |handle, appearance| {
                             handle.with_appearance(appearance)
                         })
-                        .on_drag(DragPanel, move |drag_panel, _, _, cx| {
+                        .on_drag(DragPanel, move |drag_panel, _, window, cx| {
                             cx.stop_propagation();
                             // Set current resizing panel ix
-                            state.update(cx, |state, _| {
-                                state.resizing_panel_ix = Some(ix);
+                            state.update(cx, |state, cx| {
+                                if ix + 1 < state.panels.len() {
+                                    state.resizing_panel_ix = Some(ix);
+                                    // 首次移动在拖动建立前派发，必须在此应用实际位置。
+                                    state.resize_at_pointer(window.mouse_position(), window, cx);
+                                    cx.notify();
+                                }
                             });
                             cx.new(|_| drag_panel.deref().clone())
                         }),
@@ -383,7 +387,6 @@ impl RenderOnce for ResizablePanel {
 struct ResizePanelGroupElement {
     state: Entity<ResizableState>,
     on_resize: Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>,
-    axis: Axis,
 }
 
 impl IntoElement for ResizePanelGroupElement {
@@ -436,51 +439,41 @@ impl Element for ResizePanelGroupElement {
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         window: &mut Window,
-        cx: &mut App,
+        _: &mut App,
     ) {
         window.on_mouse_event({
             let state = self.state.clone();
-            let axis = self.axis;
-            let current_ix = state.read(cx).resizing_panel_ix;
             move |e: &MouseMoveEvent, phase, window, cx| {
                 if !phase.bubble() {
                     return;
                 }
-                let Some(ix) = current_ix else { return };
-
+                if e.pressed_button != Some(MouseButton::Left) || !cx.has_active_drag() {
+                    return;
+                }
                 state.update(cx, |state, cx| {
-                    let panel = state.panels.get(ix).expect("BUG: invalid panel index");
-
-                    match axis {
-                        Axis::Horizontal => state.resize_panel_at_handle(
-                            ix,
-                            e.position.x - panel.bounds.left(),
-                            window,
-                            cx,
-                        ),
-                        Axis::Vertical => state.resize_panel_at_handle(
-                            ix,
-                            e.position.y - panel.bounds.top(),
-                            window,
-                            cx,
-                        ),
-                    }
-                    cx.notify();
-                })
+                    state.resize_at_pointer(e.position, window, cx);
+                });
             }
         });
 
         // When any mouse up, stop dragging
         window.on_mouse_event({
             let state = self.state.clone();
-            let current_ix = state.read(cx).resizing_panel_ix;
             let on_resize = self.on_resize.clone();
-            move |_: &MouseUpEvent, phase, window, cx| {
-                if current_ix.is_none() {
+            move |event: &MouseUpEvent, phase, window, cx| {
+                if !phase.bubble() {
                     return;
                 }
-                if phase.bubble() {
-                    state.update(cx, |state, cx| state.done_resizing(cx));
+                // 同一帧内开始并结束时，paint捕获的状态已过时。
+                if state.read(cx).resizing_panel_ix.is_some() {
+                    let active = event.button == MouseButton::Left && cx.has_active_drag();
+                    state.update(cx, |state, cx| {
+                        if active {
+                            state.resize_at_pointer(event.position, window, cx);
+                        }
+                        state.done_resizing(cx);
+                        cx.notify();
+                    });
                     on_resize(&state, window, cx);
                 }
             }

@@ -1,8 +1,6 @@
 use std::ops::Range;
 
-use gpui::{
-    Along, App, Axis, Bounds, Context, ElementId, EventEmitter, IsZero, Pixels, Window, px,
-};
+use gpui::{Along, Axis, Bounds, Context, ElementId, EventEmitter, IsZero, Pixels, Window, px};
 
 mod panel;
 mod resize_handle;
@@ -255,18 +253,36 @@ impl ResizableState {
         cx.emit(ResizablePanelEvent::Resized);
     }
 
+    /// 使用当前拖动状态处理指针，避免监听器跨帧持有旧索引。
+    fn resize_at_pointer(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.resizing_panel_ix else {
+            return;
+        };
+        if ix + 1 >= self.panels.len() {
+            self.resizing_panel_ix = None;
+            cx.notify();
+            return;
+        }
+        let bounds = self.panels[ix].bounds;
+        let size = match self.axis {
+            Axis::Horizontal => position.x - bounds.left(),
+            Axis::Vertical => position.y - bounds.top(),
+        };
+        self.resize_panel_at_handle(ix, size, window, cx);
+        cx.notify();
+    }
+
     fn panel_size_range(&self, ix: usize) -> Range<Pixels> {
         let Some(panel) = self.panels.get(ix) else {
             return PANEL_MIN_SIZE..Pixels::MAX;
         };
 
         panel.size_range.clone()
-    }
-
-    fn sync_real_panel_sizes(&mut self, _: &App) {
-        for (i, panel) in self.panels.iter().enumerate() {
-            self.sizes[i] = panel.bounds.size.along(self.axis);
-        }
     }
 
     /// Resize the panel at `ix` by treating `ix` as the drag-handle position
@@ -286,11 +302,10 @@ impl ResizableState {
 
         let mut ix = ix;
         // Only resize the left panels.
-        if ix >= old_sizes.len() - 1 {
+        if ix + 1 >= old_sizes.len() {
             return;
         }
         let container_size = self.container_size();
-        self.sync_real_panel_sizes(cx);
 
         let move_changed = size - old_sizes[ix];
         if move_changed == px(0.) {
@@ -625,6 +640,129 @@ mod tests {
             assert_eq!(state.sizes(), &vec![px(220.), px(180.)]);
         });
         assert_eq!(resizes.get(), 1);
+    }
+
+    #[gpui::test]
+    fn same_frame_drag_release_applies_final_position_and_never_drifts(cx: &mut TestAppContext) {
+        // 松手与最后移动同坐标，以及松手包含新位置，均不得读回旧布局。
+        for released in [220., 230.] {
+            let (cx, state, resizes) = harness(cx);
+            let boundary = cx.debug_bounds("second-panel").unwrap().left();
+            cx.simulate_mouse_down(
+                point(boundary - px(2.), px(50.)),
+                MouseButton::Left,
+                Modifiers::default(),
+            );
+            cx.update(|window, cx| {
+                // 两次派发之间不绘帧，覆盖实机短拖动的状态竞态。
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position: point(px(220.), px(50.)),
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+                assert_eq!(state.read(cx).sizes(), &vec![px(220.), px(180.)]);
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        position: point(px(released), px(50.)),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                    }),
+                    cx,
+                );
+                assert!(state.read(cx).resizing_panel_ix.is_none());
+                assert!(!cx.has_active_drag());
+                assert_eq!(
+                    state.read(cx).sizes(),
+                    &vec![px(released), px(400. - released)]
+                );
+                window.draw(cx).clear(cx);
+                window.draw(cx).clear(cx);
+                assert_eq!(
+                    state.read(cx).sizes(),
+                    &vec![px(released), px(400. - released)]
+                );
+            });
+            assert_eq!(resizes.get(), 1);
+            cx.simulate_mouse_move(point(px(100.), px(50.)), None, Modifiers::default());
+            cx.simulate_mouse_move(
+                point(px(300.), px(50.)),
+                Some(MouseButton::Left),
+                Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                point(px(300.), px(50.)),
+                MouseButton::Left,
+                Modifiers::default(),
+            );
+            state.read_with(cx, |state, _| {
+                assert_eq!(state.sizes(), &vec![px(released), px(400. - released)]);
+                assert!(state.resizing_panel_ix.is_none());
+            });
+            assert_eq!(resizes.get(), 1);
+        }
+    }
+
+    #[gpui::test]
+    fn secondary_release_ends_resize_without_applying_its_position(cx: &mut TestAppContext) {
+        let (cx, state, resizes) = harness(cx);
+        let boundary = cx.debug_bounds("second-panel").unwrap().left();
+        cx.simulate_mouse_down(
+            point(boundary - px(2.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(220.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(340.), px(50.)),
+            MouseButton::Right,
+            Modifiers::default(),
+        );
+        state.read_with(cx, |state, _| {
+            assert!(state.resizing_panel_ix.is_none());
+            assert_eq!(state.sizes(), &vec![px(220.), px(180.)]);
+        });
+        assert_eq!(resizes.get(), 1);
+        cx.simulate_mouse_move(
+            point(px(100.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(100.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.sizes(), &vec![px(220.), px(180.)])
+        });
+        assert_eq!(resizes.get(), 1);
+        cx.simulate_mouse_down(
+            point(px(218.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(250.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(250.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.sizes(), &vec![px(250.), px(150.)])
+        });
+        assert_eq!(resizes.get(), 2);
     }
 
     struct SizedGroupHarness;

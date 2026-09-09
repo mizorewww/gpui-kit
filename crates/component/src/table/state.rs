@@ -1434,69 +1434,61 @@ where
     /// column's cell. Each boundary is covered by two bands instead, one in
     /// the `th` on either side, each rendered after that `th`'s own cell and
     /// so above everything it overlaps.
+    fn resize_column_at_pointer(
+        &mut self,
+        ix: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_col_resizable(ix) {
+            return;
+        }
+        let Some(col_group) = self.col_groups.get(ix).cloned() else {
+            return;
+        };
+        self.resize_cols(
+            ix,
+            position.x - HANDLE_SIZE - col_group.bounds.left(),
+            window,
+            cx,
+        );
+        self.scroll_table_by_col_resizing(position, &col_group);
+    }
+
     fn resize_handle_band(
         &self,
         ix: usize,
         id: ElementId,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let state = cx.entity().downgrade();
         h_flex()
             .id(id)
             .occlude()
             .cursor_col_resize()
             .on_drag_move(
                 cx.listener(move |view, e: &DragMoveEvent<ResizeColumn>, window, cx| {
-                    match e.drag(cx) {
-                        ResizeColumn((entity_id, ix)) => {
-                            if cx.entity_id() != *entity_id {
-                                return;
-                            }
-
-                            // sync col widths into real widths
-                            // TODO: Consider to remove this, this may not need now.
-                            // for (_, col_group) in view.col_groups.iter_mut().enumerate() {
-                            //     col_group.width = col_group.bounds.size.width;
-                            // }
-
-                            let ix = *ix;
-                            view.resizing_col = Some(ix);
-
-                            let col_group = view
-                                .col_groups
-                                .get(ix)
-                                .expect("BUG: invalid col index")
-                                .clone();
-
-                            view.resize_cols(
-                                ix,
-                                e.event.position.x - HANDLE_SIZE - col_group.bounds.left(),
-                                window,
-                                cx,
-                            );
-
-                            // scroll the table if the drag is near the edge
-                            view.scroll_table_by_col_resizing(e.event.position, &col_group);
-                        }
-                    };
-                }),
-            )
-            .on_drag(ResizeColumn((cx.entity_id(), ix)), |drag, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| drag.clone())
-            })
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    if view.resizing_col.is_none() {
+                    let ResizeColumn((entity_id, ix)) = e.drag(cx);
+                    if cx.entity_id() != *entity_id || view.resizing_col != Some(*ix) {
                         return;
                     }
-
-                    view.resizing_col = None;
-
-                    let new_widths = view.col_groups.iter().map(|g| g.width).collect();
-                    cx.emit(TableEvent::ColumnWidthsChanged(new_widths));
-                    cx.notify();
+                    view.resize_column_at_pointer(*ix, e.event.position, window, cx);
                 }),
+            )
+            .on_drag(
+                ResizeColumn((cx.entity_id(), ix)),
+                move |drag, _, window, cx| {
+                    // 首次移动先派发再启动拖动，必须在这里应用指针位置。
+                    let _ = state.update(cx, |view, cx| {
+                        if view.is_col_resizable(ix) {
+                            view.resizing_col = Some(ix);
+                            view.resize_column_at_pointer(ix, window.mouse_position(), window, cx);
+                        }
+                    });
+                    cx.stop_propagation();
+                    cx.new(|_| drag.clone())
+                },
             )
     }
 
@@ -1549,6 +1541,7 @@ where
         Some(
             div()
                 .id(("icon-sort", col_ix))
+                .flex_shrink_0()
                 .p(px(2.))
                 .rounded(cx.theme().radius / 2.)
                 .map(|this| match is_on {
@@ -1594,7 +1587,14 @@ where
                             .size_full()
                             .justify_between()
                             .items_center()
-                            .child(self.delegate.render_th(col_ix, window, cx))
+                            .child(
+                                // 自定义标题可收缩，始终为排序入口保留完整宽度。
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(self.delegate.render_th(col_ix, window, cx)),
+                            )
                             .when_some(paddings, |this, paddings| {
                                 // Leave right space for the sort icon, if this column have custom padding
                                 let offset_pr =
@@ -2528,6 +2528,40 @@ where
 
         div()
             .size_full()
+            // 每张表仅注册一份结束监听，事件时读取当前状态，覆盖同帧短拖。
+            .child(
+                gpui::canvas(|_, _, _| (), {
+                    let state = cx.entity().downgrade();
+                    move |_, _, window, _| {
+                        window.on_mouse_event(
+                            move |event: &gpui::MouseUpEvent, phase, window, cx| {
+                                if phase != gpui::DispatchPhase::Capture {
+                                    return;
+                                }
+                                let _ = state.update(cx, |view, cx| {
+                                    let Some(ix) = view.resizing_col.take() else {
+                                        return;
+                                    };
+                                    if event.button == MouseButton::Left && cx.has_active_drag() {
+                                        view.resize_column_at_pointer(
+                                            ix,
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                    let widths =
+                                        view.col_groups.iter().map(|group| group.width).collect();
+                                    cx.emit(TableEvent::ColumnWidthsChanged(widths));
+                                    cx.notify();
+                                });
+                            },
+                        );
+                    }
+                })
+                .absolute()
+                .size_0(),
+            )
             .children(loading_view)
             .when(!loading, |this| {
                 this.child(inner_table)
@@ -2573,3 +2607,7 @@ where
             })
     }
 }
+
+#[cfg(test)]
+#[path = "resize_tests.rs"]
+mod resize_tests;
