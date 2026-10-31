@@ -3573,6 +3573,16 @@ impl<M: InputModeKind> Element for TextElement<M> {
             ElementInputHandler::new(bounds, self.state.clone()),
             cx,
         );
+        // The platform's IME panel opens at the caret; tell it when that moves.
+        if focused {
+            let anchor = (bounds.origin, prepaint.last_layout.cursor_bounds);
+            let moved = self.state.update(cx, |state, _| {
+                state.ime_anchor.replace(anchor) != Some(anchor)
+            });
+            if moved {
+                window.invalidate_character_coordinates();
+            }
+        }
 
         // Paint multi line text
         let line_height = window.line_height();
