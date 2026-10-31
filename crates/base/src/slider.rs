@@ -3,10 +3,11 @@ use std::ops::Range;
 
 use gpui::{
     AccessibleAction, Along, AnyElement, App, AppContext as _, Axis, Bounds, Context, Div,
-    DragMoveEvent, Empty, Entity, EntityId, EventEmitter, HitboxBehavior, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, Orientation, ParentElement, Pixels, Point, Render,
-    RenderOnce, Role, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
-    TouchDragEvent, TouchPhase, Window, div, prelude::FluentBuilder as _, px,
+    DragMoveEvent, Empty, Entity, EntityId, EventEmitter, FocusHandle, HitboxBehavior,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, Orientation, ParentElement,
+    Pixels, Point, Render, RenderOnce, Role, SharedString, StatefulInteractiveElement,
+    StyleRefinement, Styled, TouchDragEvent, TouchPhase, Window, div, prelude::FluentBuilder as _,
+    px,
 };
 
 use crate::{a11y_disabled::A11yDisabledExt as _, element_ext::ElementExt, geometry::AxisExt};
@@ -182,6 +183,9 @@ pub struct SliderState {
     dragging: bool,
     /// The touch drag this slider claimed, while one is live.
     touch_drag: Option<TouchDrag>,
+    /// Whether it last rendered right to left, where a horizontal slider's
+    /// value grows toward the left. Pointer events run after the draw.
+    mirrored: bool,
 }
 
 /// A touch drag claimed by a slider.
@@ -205,6 +209,7 @@ impl SliderState {
             bounds: Bounds::default(),
             scale: SliderScale::default(),
             dragging: false,
+            mirrored: false,
             touch_drag: None,
         }
     }
@@ -365,7 +370,11 @@ impl SliderState {
         let step = self.step;
 
         let inner_pos = if axis.is_horizontal() {
-            position.x - bounds.left()
+            if self.mirrored {
+                bounds.right() - position.x
+            } else {
+                position.x - bounds.left()
+            }
         } else {
             bounds.bottom() - position.y
         };
@@ -379,7 +388,7 @@ impl SliderState {
         };
 
         let value = self.percentage_to_value(percentage);
-        let value = (value / step).round() * step;
+        let value = snap_to_step(value, self.min, self.max, step);
 
         if is_start {
             self.percentage.start = percentage;
@@ -396,7 +405,11 @@ impl SliderState {
     fn is_nearer_start(&self, axis: Axis, position: Point<Pixels>) -> bool {
         let size = self.bounds.size.along(axis);
         let along = if axis.is_horizontal() {
-            position.x - self.bounds.left()
+            if self.mirrored {
+                self.bounds.right() - position.x
+            } else {
+                position.x - self.bounds.left()
+            }
         } else {
             self.bounds.bottom() - position.y
         };
@@ -415,6 +428,22 @@ impl SliderState {
         self.dragging = false;
         cx.emit(SliderEvent::Release(self.value));
     }
+}
+
+/// `value` on the nearest step counted from `min`, kept inside the range.
+fn snap_to_step(value: f32, min: f32, max: f32, step: f32) -> f32 {
+    (min + ((value - min) / step).round() * step)
+        .min(max)
+        .max(min)
+}
+
+/// `value` with its end moved by `delta` inside `min..=max`. A range keeps
+/// its start: assistive-technology increments move only the end thumb.
+fn step_end(value: SliderValue, delta: f32, min: f32, max: f32) -> SliderValue {
+    let mut value = value;
+    let end = (value.end() + delta).min(max).max(min);
+    value.set_end(end);
+    value
 }
 
 #[derive(Clone)]
@@ -444,6 +473,7 @@ pub struct Slider {
     axis: Axis,
     disabled: bool,
     accessibility_label: Option<SharedString>,
+    focus: Option<FocusHandle>,
     base: Div,
     children: Vec<AnyElement>,
 }
@@ -455,6 +485,7 @@ impl Slider {
             axis: Axis::Horizontal,
             disabled: false,
             accessibility_label: None,
+            focus: None,
             base: div(),
             children: Vec::new(),
         }
@@ -485,6 +516,13 @@ impl Slider {
         self.accessibility_label = Some(label.into());
         self
     }
+
+    /// Makes the slider's accessibility node itself focusable with `focus`,
+    /// so keyboard focus and assistive technology land on the slider.
+    pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
+        self.focus = Some(focus.clone());
+        self
+    }
 }
 
 impl ParentElement for Slider {
@@ -501,6 +539,10 @@ impl Styled for Slider {
 
 impl RenderOnce for Slider {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let mirrored = window.layout_direction().is_rtl();
+        if self.state.read(cx).mirrored != mirrored {
+            self.state.update(cx, |state, _| state.mirrored = mirrored);
+        }
         let axis = self.axis;
         let entity_id = self.state.entity_id();
         let state = self.state.read(cx);
@@ -509,6 +551,7 @@ impl RenderOnce for Slider {
         self.base
             .id(("slider", entity_id))
             .test_support()
+            .when_some(self.focus, |this, focus| this.track_focus(&focus))
             .role(Role::Slider)
             .when_some(self.accessibility_label, |this, label| {
                 this.aria_label(label)
@@ -529,8 +572,12 @@ impl RenderOnce for Slider {
                     let state = slider_state.clone();
                     move |_, window, cx| {
                         state.update(cx, |state, cx| {
-                            let value =
-                                (state.value().end() + state.step_value()).min(state.max_value());
+                            let value = step_end(
+                                state.value(),
+                                state.step_value(),
+                                state.min_value(),
+                                state.max_value(),
+                            );
                             state.set_value(value, window, cx);
                         });
                     }
@@ -539,8 +586,12 @@ impl RenderOnce for Slider {
                     let state = slider_state.clone();
                     move |_, window, cx| {
                         state.update(cx, |state, cx| {
-                            let value =
-                                (state.value().end() - state.step_value()).max(state.min_value());
+                            let value = step_end(
+                                state.value(),
+                                -state.step_value(),
+                                state.min_value(),
+                                state.max_value(),
+                            );
                             state.set_value(value, window, cx);
                         });
                     }
@@ -691,7 +742,11 @@ impl RenderOnce for SliderTrack {
                             let is_start = if is_range {
                                 let size = state.bounds().size.along(axis);
                                 let position = if axis.is_horizontal() {
-                                    event.position.x - state.bounds().left()
+                                    if state.mirrored {
+                                        state.bounds().right() - event.position.x
+                                    } else {
+                                        event.position.x - state.bounds().left()
+                                    }
                                 } else {
                                     state.bounds().bottom() - event.position.y
                                 };
@@ -938,6 +993,33 @@ mod tests {
             .default_value(10.);
         let percentage = state.percentage().end;
         assert!((percentage - (1. / 3.)).abs() < 0.0001);
+    }
+
+    #[test]
+    fn dragging_snaps_from_min() {
+        // Steps count from `min`: 3 + 5k, not multiples of 5.
+        assert_eq!(snap_to_step(9.4, 3., 100., 5.), 8.);
+        assert_eq!(snap_to_step(11., 3., 100., 5.), 13.);
+        // A step past the end stays inside the range.
+        assert_eq!(snap_to_step(99., 3., 100., 5.), 98.);
+        assert_eq!(snap_to_step(100., 0., 99., 10.), 99.);
+    }
+
+    #[test]
+    fn accessibility_steps_move_only_a_ranges_end() {
+        assert_eq!(
+            step_end(SliderValue::Range(20., 60.), 1., 0., 100.),
+            SliderValue::Range(20., 61.)
+        );
+        assert_eq!(
+            step_end(SliderValue::Range(20., 20.), -1., 0., 100.),
+            SliderValue::Range(20., 20.),
+            "the end never passes the start"
+        );
+        assert_eq!(
+            step_end(SliderValue::Single(99.5), 1., 0., 100.),
+            SliderValue::Single(100.)
+        );
     }
 
     #[test]
