@@ -112,6 +112,9 @@ impl FrameSampler {
                     presents.push(timing.present_end);
                 }
                 FrameEvent::Present(_) => {}
+                // The dev overlay's CPU scope event; the HUD does not read it.
+                #[allow(unreachable_patterns)]
+                _ => {}
             }
         }
         if !self.drained_backlog {
