@@ -24,7 +24,7 @@ where
 
 type RenderItem = dyn Fn(usize, &TreeEntry, bool, &mut Window, &mut App) -> ListItem;
 type ContextMenuBuilder =
-    dyn Fn(usize, &TreeEntry, PopupMenu, &mut Window, &mut Context<TreeState>) -> PopupMenu;
+    dyn Fn(usize, &TreeEntry, PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu;
 
 /// A styled tree view that preserves the legacy `gpui-component` API while
 /// delegating tree behavior and interaction state to `gpui-base`.
@@ -53,10 +53,14 @@ impl Tree {
         }
     }
 
-    /// Add a context menu to the tree.
+    /// Add a context menu to the tree's rows, built for the row right-clicked.
+    ///
+    /// The builder gets the menu's own context, as
+    /// [`ContextMenuExt::context_menu`](crate::menu::ContextMenuExt::context_menu)'s
+    /// does, so the menu can hold submenus ([`PopupMenu::submenu`]).
     pub fn context_menu<F>(mut self, f: F) -> Self
     where
-        F: Fn(usize, &TreeEntry, PopupMenu, &mut Window, &mut Context<TreeState>) -> PopupMenu
+        F: Fn(usize, &TreeEntry, PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu
             + 'static,
     {
         self.context_menu_builder = Some(Rc::new(f));
@@ -118,17 +122,16 @@ impl RenderOnce for Tree {
                             let Some(build) = context_menu_builder.as_ref() else {
                                 return menu;
                             };
-                            context_menu_state.update(cx, |state, cx| {
-                                let Some(entry) = state
-                                    .entry(ix)
-                                    .filter(|entry| entry.item().id == id)
-                                    .filter(|entry| !entry.is_disabled())
-                                    .cloned()
-                                else {
-                                    return menu;
-                                };
-                                build(ix, &entry, menu, window, cx)
-                            })
+                            let Some(entry) = context_menu_state
+                                .read(cx)
+                                .entry(ix)
+                                .filter(|entry| entry.item().id == id)
+                                .filter(|entry| !entry.is_disabled())
+                                .cloned()
+                            else {
+                                return menu;
+                            };
+                            build(ix, &entry, menu, window, cx)
                         });
                         if entry_state.is_selected() {
                             *row_menu.borrow_mut() = Some(row.keyboard_trigger());
