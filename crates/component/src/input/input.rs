@@ -118,6 +118,42 @@ fn exposes_accessibility_value(content_type: Option<InputContentType>) -> bool {
     )
 }
 
+/// Append what can be done about `misspelling` to `menu` and return it: each
+/// of the spell checker's guesses, which replaces the word, then Learn
+/// Spelling. With no misspelling, `menu` is returned as it was.
+///
+/// The built-in context menu begins with these; a custom one reads the word
+/// it was opened on with `context_menu_misspelling()`.
+pub fn spelling_context_menu(
+    mut menu: NativeMenu,
+    misspelling: Option<&gpui_base::input::Misspelling>,
+) -> NativeMenu {
+    let Some(misspelling) = misspelling else {
+        return menu;
+    };
+    if misspelling.guesses.is_empty() {
+        menu = menu.menu_with_disabled(
+            t!("Input.No Guesses Found"),
+            true,
+            Box::new(gpui_base::input::LearnSpelling),
+        );
+    }
+    for guess in &misspelling.guesses {
+        menu = menu.menu(
+            guess.clone(),
+            Box::new(gpui_base::input::CorrectSpelling {
+                replacement: guess.clone(),
+            }),
+        );
+    }
+    menu.separator()
+        .menu(
+            t!("Input.Learn Spelling"),
+            Box::new(gpui_base::input::LearnSpelling),
+        )
+        .separator()
+}
+
 /// Returns `(background, foreground)` colors for input-like components.
 pub(crate) fn input_style(disabled: bool, cx: &App) -> (Hsla, Hsla) {
     if disabled {
@@ -668,6 +704,7 @@ impl RenderOnce for Input {
         state.set_readonly(self.readonly, cx);
         state.set_text_align(text_align, cx);
         let custom = self.context_menu_builder.clone();
+        let spelling = state.clone();
         state.on_context_menu(
             Rc::new(move |_, capabilities, position, window, cx| {
                 let menu = if let Some(custom) = custom.as_ref() {
@@ -677,7 +714,8 @@ impl RenderOnce for Input {
                     // A read-only input can still navigate the code, it only
                     // rejects the items that would change the text.
                     let editable = enabled && !capabilities.is_readonly();
-                    let mut menu = NativeMenu::new();
+                    let misspelling = spelling.context_menu_misspelling(cx);
+                    let mut menu = spelling_context_menu(NativeMenu::new(), misspelling.as_ref());
                     if capabilities.is_code_editor() {
                         menu = menu
                             .menu_with_disabled(

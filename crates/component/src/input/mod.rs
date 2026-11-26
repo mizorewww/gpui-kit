@@ -44,6 +44,7 @@ pub use gpui_base::input::{
     TextDecorationCollection, TextareaState, ToggleCodeActions, Undo, WrappingIndent,
     highlight_characters, highlight_contains, highlight_prefix,
 };
+pub use gpui_base::input::{CorrectSpelling, LearnSpelling, Misspelling, SpellChecker};
 pub use gpui_base::input::{EditorMode, InputMode, InputModeKind, TextareaMode};
 pub use gutter_style::GutterStyle;
 #[doc(hidden)]
