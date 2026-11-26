@@ -205,6 +205,17 @@ let recognizer = SystemRecognizer::new().expected_phrases(["GPUI", "Longbridge",
 let speech = cx.new(|cx| SpeechState::new(cx).recognizer(recognizer));
 ```
 
+要让用户选择语言，就提供这台机器能识别的语言。`SystemRecognizer::supported_locales()` 按名称排序列出它们：在 macOS 上是 Mac 可离线识别的语言，在 Windows 上是已安装语音包的语言，其他平台为空。每个 `SpeechLocale` 提供传给 `.locale(...)` 的 `tag()`，以及用于选择器、以用户语言显示的 `name()`。用户安装语言后列表会变化，因此在显示选择器时读取它。
+
+```rust
+use gpui_kit::component::speech::{SpeechLocale, SystemRecognizer};
+
+let locales: Vec<SpeechLocale> = SystemRecognizer::supported_locales();
+// 在 `Select` 中显示 `locale.name()`，例如“中文（中国大陆）”，
+// 然后识别用户选中的语言：
+let recognizer = SystemRecognizer::new().locale(picked.tag().clone());
+```
+
 ## 实现识别器
 
 实现 `SpeechRecognizer` 即可接入任意语音服务。`start` 打开一个 `RecognitionSession`，并通过收到的 `SpeechSink` 报告结果：
@@ -348,6 +359,7 @@ Linux 没有系统识别器，只有在应用提供识别器时才能使用语�
 - [AudioInput]、[AudioSink] 与 [AudioFormat]：音频的扩展点
 - [SpeechError]
 - [SystemRecognizer] 与 [Microphone]：`speech` feature 提供的默认实现
+- [SpeechLocale]：`SystemRecognizer::supported_locales` 列出的语言
 
 [SpeechState]: https://docs.rs/gpui-component/latest/gpui_component/speech/struct.SpeechState.html
 [SpeechEvent]: https://docs.rs/gpui-component/latest/gpui_component/speech/enum.SpeechEvent.html
@@ -362,4 +374,5 @@ Linux 没有系统识别器，只有在应用提供识别器时才能使用语�
 [AudioFormat]: https://docs.rs/gpui-component/latest/gpui_component/speech/struct.AudioFormat.html
 [SpeechError]: https://docs.rs/gpui-component/latest/gpui_component/speech/enum.SpeechError.html
 [SystemRecognizer]: https://docs.rs/gpui-component/latest/gpui_component/speech/struct.SystemRecognizer.html
+[SpeechLocale]: https://docs.rs/gpui-component/latest/gpui_component/speech/struct.SpeechLocale.html
 [Microphone]: https://docs.rs/gpui-component/latest/gpui_component/speech/struct.Microphone.html
