@@ -704,7 +704,7 @@ impl RenderOnce for Input {
         state.set_readonly(self.readonly, cx);
         state.set_text_align(text_align, cx);
         let custom = self.context_menu_builder.clone();
-        let spelling = state.clone();
+        let misspelling = state.context_menu_misspelling();
         state.on_context_menu(
             Rc::new(move |_, capabilities, position, window, cx| {
                 let menu = if let Some(custom) = custom.as_ref() {
@@ -714,7 +714,7 @@ impl RenderOnce for Input {
                     // A read-only input can still navigate the code, it only
                     // rejects the items that would change the text.
                     let editable = enabled && !capabilities.is_readonly();
-                    let misspelling = spelling.context_menu_misspelling(cx);
+                    let misspelling = misspelling(cx);
                     let mut menu = spelling_context_menu(NativeMenu::new(), misspelling.as_ref());
                     if capabilities.is_code_editor() {
                         menu = menu
